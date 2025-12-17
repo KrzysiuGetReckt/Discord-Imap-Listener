@@ -29,6 +29,8 @@ async function startImap() {
       markSeen: true 
     };
 
+    console.log("New mail detected, fetching...");
+    
     const results = await connection.search(searchCriteria, fetchOptions);
 
     for (const res of results) {
@@ -38,6 +40,8 @@ async function startImap() {
       if (!mail.date || mail.date < fiveMinutesAgo) {
         continue; // Skip old emails
       }
+
+      console.log(`New email from: ${mail.from.text}, subject: ${mail.subject}`);
 
       const channel = await discord.channels.fetch(
         process.env.DISCORD_CHANNEL_ID
