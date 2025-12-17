@@ -2,6 +2,8 @@ require("dotenv").config();
 const imaps = require("imap-simple");
 const { simpleParser } = require("mailparser");
 const discord = require("./discord");
+const { getMailPreview } = require("./funcitons/getMailPreview");
+const { getRecipient } = require("./funcitons/getRecipient");
 
 const config = {
   imap: {
@@ -30,7 +32,7 @@ async function startImap() {
     };
 
     console.log("New mail detected, fetching...");
-    
+
     const results = await connection.search(searchCriteria, fetchOptions);
 
     for (const res of results) {
@@ -47,11 +49,20 @@ async function startImap() {
         process.env.DISCORD_CHANNEL_ID
       );
 
-      await channel.send(
-        `<@&${process.env.DISCORD_ROLE_ID}> 📧 **New Email**\n` +
-        `**From:** ${mail.from.text}\n` +
-        `**Subject:** ${mail.subject}`
-      );
+      const preview = getMailPreview(mail, 500);
+
+      await channel.send({
+        embeds: [{
+          title: "📧 Nowy Mail",
+          fields: [
+            { name: "Nadawca", value: mail.from.text, inline: true },
+            { name: "Odbiorca", value: getRecipient(mail), inline: true },
+            { name: "Temat", value: mail.subject || "(brak tematu)" },
+            { name: "Opis", value: preview }
+          ],
+          timestamp: mail.date
+        }]
+      });
     }
   });
 }
