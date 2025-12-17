@@ -52,6 +52,7 @@ async function startImap() {
       const preview = getMailPreview(mail, 500);
 
       await channel.send({
+        content: `<@&${process.env.DISCORD_ROLE_ID}>`,
         embeds: [{
           title: "📧 Nowy Mail",
           fields: [
