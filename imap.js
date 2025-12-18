@@ -12,38 +12,86 @@ const config = {
     host: process.env.IMAP_HOST,
     port: process.env.IMAP_PORT,
     tls: true,
-    authTimeout: 10000
+    authTimeout: 10000,
+    keepalive: {
+      interval: 10000,
+      idleInterval: 300000, // 5 min
+      forceNoop: true
+    }
   }
 };
 
-async function startImap() {
-  const connection = await imaps.connect(config);
+let connection;
+let lastCehck = new Date();
+let poolingInterval;
+
+async function connectImap() {
+
+  try {
+  connection = await imaps.connect(config);
   await connection.openBox("INBOX");
 
-  console.log("IMAP connected. Waiting for new mail...");
+  console.log("Connected to IMAP server.");
 
-  // IDLE mode
+  setupListeners();
+  startPooling();
+
+  // Initial mail check
+  await checkMail();
+  } catch (error) {
+    console.error("❌ IMAP connection failed:", error.message);
+    retryConnect();
+  }
+}
+
+function setupListeners() {
+  //Imap idle event listener
   connection.on("mail", async () => {
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const searchCriteria = ["UNSEEN", ["SINCE", new Date()]];
-    const fetchOptions = { 
+    console.log("📩 IMAP IDLE: new mail detected");
+    await checkMail();
+  });
+
+  connection.on("close", () => {
+    // IMAP Dropped connection -> Try Reconnect
+    console.warn("⚠️ IMAP connection closed. Attempting to reconnect...");
+    retryConnect();
+  });
+
+  connection.on("error", (err) => {
+    console.error("❌ IMAP error:", err.message);
+    retryConnect();
+  });
+}
+
+function startPooling() {
+  poolingInterval = setInterval(() => {
+    console.log("🔄 IMAP Pooling Fallback Triggered: checking connection...");
+    checkMail();
+  }, process.env.POOLING_INTERVAL_MS || 300000); // Default to 5 minutes
+}
+
+async function checkMail() {
+  if (!connection) return;
+
+  try {
+    const searchCriteria = [
+      "UNSEEN",
+      ["SINCE", lastCehck]
+    ];
+
+    const fetchOptions = {
       bodies: [""],
-      markSeen: true 
+      markSeen: true
     };
 
-    console.log("New mail detected, fetching...");
-
     const results = await connection.search(searchCriteria, fetchOptions);
+    lastCehck = new Date();
 
     for (const res of results) {
       const raw = res.parts[0].body;
       const mail = await simpleParser(raw);
 
-      if (!mail.date || mail.date < fiveMinutesAgo) {
-        continue; // Skip old emails
-      }
-
-      console.log(`New email from: ${mail.from.text}, subject: ${mail.subject}`);
+      console.log(`📧 ${mail.from.text} → ${mail.subject}`);
 
       const channel = await discord.channels.fetch(
         process.env.DISCORD_CHANNEL_ID
@@ -65,7 +113,28 @@ async function startImap() {
         }]
       });
     }
-  });
+  } catch (error) {
+    console.error("❌ Error checking mail:", error.message);
+  }
 }
 
-startImap().catch(console.error);
+
+function retryConnect() {
+
+  console.log("🔄 Retrying IMAP connection...");
+
+  try {
+    if (poolingInterval) clearInterval(poolingInterval);
+    if (connection) connection.end();
+  } catch {}
+
+  retryConnect();
+}
+
+function retryConnect() {
+  setTimeout(() => {
+    connectImap();
+  }, 10000); // Retry after 10 seconds
+}
+
+connectImap();
