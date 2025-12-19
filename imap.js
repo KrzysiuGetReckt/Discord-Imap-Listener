@@ -47,6 +47,7 @@ let connection;
 let lastCheckMap = new Map();
 let poolingInterval;
 let isPooling = false;
+let idleTimer;
 
 function getLastCheck(mailbox) {
   if(!lastCheckMap.has(mailbox)) {
@@ -87,8 +88,14 @@ async function connectImap() {
 function setupListeners() {
   //Imap idle event listener
   connection.on("mail", async () => {
-    console.log("📩 IMAP IDLE: new mail detected (INBOX)");
-    await checkMail("INBOX");
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout( async () => {
+      console.log("📩 IMAP IDLE: new mail detected (INBOX)");
+      for (const mailbox of config.watchedFolders) {
+        checkMail(mailbox);
+      }
+      await connection.openBox("INBOX");
+    }, 1000);
   });
 
   connection.on("close", () => {
