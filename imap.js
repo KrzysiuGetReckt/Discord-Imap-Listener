@@ -22,8 +22,20 @@ const config = {
 };
 
 let connection;
-let lastCehck = new Date();
+let lastCheckMap = new Map();
 let poolingInterval;
+let isPooling = false;
+
+function getLastCheck(mailbox) {
+  if(!lastCheckMap.has(mailbox)) {
+    lastCheckMap.set(mailbox, new Date(0));
+}   
+  return lastCheckMap.get(mailbox);
+}
+
+function updateLastCheck(mailbox) {
+  lastCheckMap.set(mailbox, new Date());
+}
 
 async function connectImap() {
 
@@ -37,7 +49,18 @@ async function connectImap() {
   startPooling();
 
   // Initial mail check
-  await checkMail();
+  const WATCHED_FOLDERS = process.env.WATCHED_FOLDERS
+    ? process.env.WATCHED_FOLDERS.split(",").map(f => f.trim())
+    : [];
+
+  if (!WATCHED_FOLDERS.length) {
+    console.warn("⚠️ No WATCHED_FOLDERS specified in environment variables.");
+  }
+
+  for (const mailbox of WATCHED_FOLDERS) {
+    await checkMail(mailbox);
+  } 
+
   } catch (error) {
     console.error("❌ IMAP connection failed:", error.message);
     retryConnect();
@@ -47,8 +70,8 @@ async function connectImap() {
 function setupListeners() {
   //Imap idle event listener
   connection.on("mail", async () => {
-    console.log("📩 IMAP IDLE: new mail detected");
-    await checkMail();
+    console.log("📩 IMAP IDLE: new mail detected (INBOX)");
+    await checkMail("INBOX");
   });
 
   connection.on("close", () => {
@@ -64,19 +87,37 @@ function setupListeners() {
 }
 
 function startPooling() {
-  poolingInterval = setInterval(() => {
+  const WATCHED_FOLDERS = process.env.WATCHED_FOLDERS
+    ? process.env.WATCHED_FOLDERS.split(",").map(f => f.trim())
+    : [];
+
+  poolingInterval = setInterval(async () => {
     console.log("🔄 IMAP Pooling Fallback Triggered: checking connection...");
-    checkMail();
+
+    if (isPooling) return;
+    isPooling = true;
+
+    try {
+      for (const mailbox of WATCHED_FOLDERS) {
+        await checkMail(mailbox);
+      }
+    } finally {
+      isPooling = false;
+    }
   }, process.env.POOLING_INTERVAL_MS || 300000); // Default to 5 minutes
 }
 
-async function checkMail() {
+async function checkMail(mailbox = "INBOX") {
   if (!connection) return;
 
   try {
+    if (!connection.box || connection.box.name !== mailbox) {
+      await connection.openBox(mailbox, false);
+    }
+    
     const searchCriteria = [
       "UNSEEN",
-      ["SINCE", lastCehck]
+      ["SINCE", getLastCheck(mailbox)]
     ];
 
     const fetchOptions = {
@@ -85,13 +126,13 @@ async function checkMail() {
     };
 
     const results = await connection.search(searchCriteria, fetchOptions);
-    lastCehck = new Date();
+    updateLastCheck(mailbox);
 
     for (const res of results) {
       const raw = res.parts[0].body;
       const mail = await simpleParser(raw);
 
-      console.log(`📧 ${mail.from.text} → ${mail.subject}`);
+      console.log(`📧 [${mailbox}]  ${mail.from.text} → ${mail.subject}`);
 
       const channel = await discord.channels.fetch(
         process.env.DISCORD_CHANNEL_ID
@@ -104,6 +145,7 @@ async function checkMail() {
         embeds: [{
           title: "📧 Nowy Mail",
           fields: [
+            { name: "Folder", value: mailbox },
             { name: "Nadawca", value: mail.from.text, inline: true },
             { name: "Odbiorca", value: getRecipient(mail), inline: true },
             { name: "Temat", value: mail.subject || "(brak tematu)" },
@@ -128,10 +170,6 @@ function retryConnect() {
     if (connection) connection.end();
   } catch {}
 
-  retryConnect();
-}
-
-function retryConnect() {
   setTimeout(() => {
     connectImap();
   }, 10000); // Retry after 10 seconds
