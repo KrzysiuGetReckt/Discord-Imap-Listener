@@ -4,8 +4,7 @@ const { simpleParser } = require("mailparser");
 const discord = require("./discord");
 const { getMailPreview } = require("./funcitons/getMailPreview");
 const { getRecipient } = require("./funcitons/getRecipient");
-
-
+const { hasProcessed, markAsProcessed } = require("./uidDatabase");
 
 const config = {
   imap: {
@@ -40,25 +39,14 @@ const config = {
     : []
 };
 
+const mailboxLocks = new Set();
 const discordQueue = [];
 let isSendingDiscord = false;
 
 let connection;
-let lastCheckMap = new Map();
 let poolingInterval;
 let isPooling = false;
 let idleTimer;
-
-function getLastCheck(mailbox) {
-  if(!lastCheckMap.has(mailbox)) {
-    lastCheckMap.set(mailbox, new Date(0));
-}   
-  return lastCheckMap.get(mailbox);
-}
-
-function updateLastCheck(mailbox) {
-  lastCheckMap.set(mailbox, new Date());
-}
 
 async function connectImap() {
 
@@ -86,16 +74,16 @@ async function connectImap() {
 }
 
 function setupListeners() {
-  //Imap idle event listener
   connection.on("mail", async () => {
+    if (isPooling) {
+      console.log("⏭️ IDLE ignored (polling active)");
+      return;
+    }
+
     clearTimeout(idleTimer);
-    idleTimer = setTimeout( async () => {
-      console.log("📩 IMAP IDLE: new mail detected (INBOX)");
-      for (const mailbox of config.watchedFolders) {
-        checkMail(mailbox);
-      }
-      await connection.openBox("INBOX");
-    }, 1000);
+    idleTimer = setTimeout(() => {
+      checkMail("INBOX");
+    }, 500);
   });
 
   connection.on("close", () => {
@@ -140,42 +128,45 @@ function startPooling() {
 async function checkMail(mailbox = "INBOX") {
   if (!connection) return;
 
+  if (mailboxLocks.has(mailbox)) {
+    console.log(`⏭️ ${mailbox} check skipped (already running)`);
+    return;
+  }
+
+  mailboxLocks.add(mailbox);
+
   try {
     if (!connection.box || connection.box.name !== mailbox) {
       await connection.openBox(mailbox, false);
     }
-    
-    const searchCriteria = [
-      "UNSEEN",
-      ["SINCE", getLastCheck(mailbox)]
-    ];
 
-    const fetchOptions = {
-      bodies: [""],
-      markSeen: true
-    };
-
-    const results = await connection.search(searchCriteria, fetchOptions);
-    updateLastCheck(mailbox);
+    const results = await connection.search(
+      ["UNSEEN"],
+      {
+        bodies: [""],
+        struct: true,
+        markSeen: true
+      }
+    );
 
     for (const res of results) {
+      const uid = res.attributes.uid;
+
+      if (hasProcessed(mailbox, uid)) continue;
+      markAsProcessed(mailbox, uid); // <-- MOVE THIS UP
+
       const raw = res.parts[0].body;
       const mail = await simpleParser(raw);
 
-      console.log(`📧 [${mailbox}]  ${mail.from.text} → ${mail.subject}`);
+      console.log(`📧 [${mailbox}] ${mail.subject}`);
 
-      const channel = await discord.channels.fetch(
-        config.discord.channelId
-      ).catch(() => null);
+      const channel = await discord.channels
+        .fetch(config.discord.channelId)
+        .catch(() => null);
 
-      if (!channel) {
-        console.error("❌ Discord channel not found or inaccessible");
-        return;
-      }
+      if (!channel) continue;
 
-      const preview = getMailPreview(mail, 500);
-
-     enqueueDiscordMessage(channel, {
+      enqueueDiscordMessage(channel, {
         content: `<@&${config.discord.roleId}>`,
         embeds: [{
           title: "📧 Nowy Mail",
@@ -184,14 +175,17 @@ async function checkMail(mailbox = "INBOX") {
             { name: "Nadawca", value: mail.from.text, inline: true },
             { name: "Odbiorca", value: getRecipient(mail), inline: true },
             { name: "Temat", value: mail.subject || "(brak tematu)" },
-            { name: "Opis", value: preview }
+            { name: "Opis", value: getMailPreview(mail, 500) }
           ],
           timestamp: mail.date
         }]
       });
     }
-  } catch (error) {
-    console.error("❌ Error checking mail:", error.message);
+
+  } catch (err) {
+    console.error(`❌ Error checking ${mailbox}:`, err.message);
+  } finally {
+    mailboxLocks.delete(mailbox);
   }
 }
 
