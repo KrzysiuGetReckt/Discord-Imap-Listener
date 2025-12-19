@@ -5,21 +5,43 @@ const discord = require("./discord");
 const { getMailPreview } = require("./funcitons/getMailPreview");
 const { getRecipient } = require("./funcitons/getRecipient");
 
+
+
 const config = {
   imap: {
     user: process.env.EMAIL,
     password: process.env.EMAIL_PASSWORD,
     host: process.env.IMAP_HOST,
-    port: process.env.IMAP_PORT,
+    port: Number(process.env.IMAP_PORT),
     tls: true,
     authTimeout: 10000,
     keepalive: {
       interval: 10000,
-      idleInterval: 300000, // 5 min
+      idleInterval: 300000,
       forceNoop: true
     }
-  }
+  },
+
+  polling: {
+    intervalMs: Number(process.env.POOLING_INTERVAL_MS) || 15000
+  },
+
+  discord: {
+    channelId: process.env.DISCORD_CHANNEL_ID,
+    roleId: process.env.DISCORD_ROLE_ID,
+    rateLimit: {
+      messagesPerInterval: Number(process.env.DISCORD_RATE_LIMIT_COUNT) || 5,
+      intervalMs: Number(process.env.DISCORD_RATE_LIMIT_INTERVAL_MS) || 5000
+    }
+  },
+
+  watchedFolders: process.env.WATCHED_FOLDERS
+    ? process.env.WATCHED_FOLDERS.split(",").map(f => f.trim())
+    : []
 };
+
+const discordQueue = [];
+let isSendingDiscord = false;
 
 let connection;
 let lastCheckMap = new Map();
@@ -40,7 +62,7 @@ function updateLastCheck(mailbox) {
 async function connectImap() {
 
   try {
-  connection = await imaps.connect(config);
+  connection = await imaps.connect({ imap: config.imap });
   await connection.openBox("INBOX");
 
   console.log("Connected to IMAP server.");
@@ -48,16 +70,11 @@ async function connectImap() {
   setupListeners();
   startPooling();
 
-  // Initial mail check
-  const WATCHED_FOLDERS = process.env.WATCHED_FOLDERS
-    ? process.env.WATCHED_FOLDERS.split(",").map(f => f.trim())
-    : [];
-
-  if (!WATCHED_FOLDERS.length) {
+  if (!config.watchedFolders.length) {
     console.warn("⚠️ No WATCHED_FOLDERS specified in environment variables.");
   }
 
-  for (const mailbox of WATCHED_FOLDERS) {
+  for (const mailbox of config.watchedFolders) {
     await checkMail(mailbox);
   } 
 
@@ -87,24 +104,30 @@ function setupListeners() {
 }
 
 function startPooling() {
-  const WATCHED_FOLDERS = process.env.WATCHED_FOLDERS
-    ? process.env.WATCHED_FOLDERS.split(",").map(f => f.trim())
-    : [];
+  console.log("⏱️ Starting IMAP pooling fallback...");
 
   poolingInterval = setInterval(async () => {
     console.log("🔄 IMAP Pooling Fallback Triggered: checking connection...");
 
-    if (isPooling) return;
+    console.log(
+    "🕒 Poll tick",
+    new Date().toISOString()
+    );
+
+    if (isPooling){ 
+      console.log("⏭️ Poll skipped (already running)");
+      return;
+    }
     isPooling = true;
 
     try {
-      for (const mailbox of WATCHED_FOLDERS) {
+      for (const mailbox of config.watchedFolders) {
         await checkMail(mailbox);
       }
     } finally {
       isPooling = false;
     }
-  }, process.env.POOLING_INTERVAL_MS || 300000); // Default to 5 minutes
+  }, config.polling.intervalMs || 300000); // Default to 5 minutes
 }
 
 async function checkMail(mailbox = "INBOX") {
@@ -135,13 +158,18 @@ async function checkMail(mailbox = "INBOX") {
       console.log(`📧 [${mailbox}]  ${mail.from.text} → ${mail.subject}`);
 
       const channel = await discord.channels.fetch(
-        process.env.DISCORD_CHANNEL_ID
-      );
+        config.discord.channelId
+      ).catch(() => null);
+
+      if (!channel) {
+        console.error("❌ Discord channel not found or inaccessible");
+        return;
+      }
 
       const preview = getMailPreview(mail, 500);
 
-      await channel.send({
-        content: `<@&${process.env.DISCORD_ROLE_ID}>`,
+     enqueueDiscordMessage(channel, {
+        content: `<@&${config.discord.roleId}>`,
         embeds: [{
           title: "📧 Nowy Mail",
           fields: [
@@ -175,4 +203,38 @@ function retryConnect() {
   }, 10000); // Retry after 10 seconds
 }
 
-connectImap();
+discord.once("clientReady", () => {
+  console.log("🤖 Discord bot ready");
+  connectImap();
+});
+
+function enqueueDiscordMessage(channel, payload) {
+  discordQueue.push({ channel, payload });
+  processDiscordQueue();
+}
+
+async function processDiscordQueue() {
+  if (isSendingDiscord) return;
+  isSendingDiscord = true;
+
+  const { messagesPerInterval, intervalMs } = config.discord.rateLimit;
+
+  while (discordQueue.length) {
+    const batch = discordQueue.splice(0, messagesPerInterval);
+
+    for (const { channel, payload } of batch) {
+      try {
+        await channel.send(payload);
+        console.log("✅ Discord message sent");
+      } catch (error) {
+        console.error("❌ Error sending Discord message:", error.message);
+      }
+    }
+
+    if (discordQueue.length) {
+      await new Promise(res => setTimeout(res, intervalMs));
+    }
+  }
+
+  isSendingDiscord = false;
+}
