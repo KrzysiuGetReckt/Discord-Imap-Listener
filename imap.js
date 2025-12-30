@@ -34,6 +34,7 @@ const config = {
     }
   },
 
+  ignoredEmails: process.env.IGNORED_EMAILS,
   watchedFolders: process.env.WATCHED_FOLDERS
     ? process.env.WATCHED_FOLDERS.split(",").map(f => f.trim())
     : []
@@ -145,7 +146,7 @@ async function checkMail(mailbox = "INBOX") {
       {
         bodies: [""],
         struct: true,
-        markSeen: true
+        markSeen: false
       }
     );
 
@@ -153,10 +154,17 @@ async function checkMail(mailbox = "INBOX") {
       const uid = res.attributes.uid;
 
       if (hasProcessed(mailbox, uid)) continue;
-      markAsProcessed(mailbox, uid); // <-- MOVE THIS UP
+      markAsProcessed(mailbox, uid); 
 
       const raw = res.parts[0].body;
       const mail = await simpleParser(raw);
+
+     const sender = mail.from?.value?.[0]?.address?.toLowerCase() || "";
+
+      if (config.ignoredEmails.includes(sender)) {
+        console.log(`⏭️ Ignored mail from ${sender}`);
+        continue; // skip Discord notification
+      }
 
       console.log(`📧 [${mailbox}] ${mail.subject}`);
 
