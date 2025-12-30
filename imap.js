@@ -160,10 +160,20 @@ async function checkMail(mailbox = "INBOX") {
       const mail = await simpleParser(raw);
 
      const sender = mail.from?.value?.[0]?.address?.toLowerCase() || "";
+     const recipients = [
+      ...(mail.to?.value ?? []),
+      ...(mail.cc?.value ?? []),
+      ...(mail.bcc?.value ?? []),
+     ].map(r => r.address.toLowerCase());
 
-      if (config.ignoredEmails.includes(sender)) {
-        console.log(`⏭️ Ignored mail from ${sender}`);
-        continue; // skip Discord notification
+      const isIgnored =
+        config.ignoredEmails.includes(sender) ||
+        recipients.some(r => config.ignoredEmails.includes(r));
+
+      if (isIgnored) {
+        console.log(`⏭️ Ignored mail | from: ${sender} | to: ${recipients.join(", ")}`);
+        markAsProcessed(mailbox, uid);
+        continue; 
       }
 
       console.log(`📧 [${mailbox}] ${mail.subject}`);
