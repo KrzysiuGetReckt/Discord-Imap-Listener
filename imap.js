@@ -48,29 +48,34 @@ let connection;
 let poolingInterval;
 let isPooling = false;
 let idleTimer;
+let reconnectAttempts = 0;
+let reconnecting = false;
 
 async function connectImap() {
+  if (reconnecting) return;
+  reconnecting = true;
 
-  try {
-  connection = await imaps.connect({ imap: config.imap });
-  await connection.openBox("INBOX");
-
-  console.log("Connected to IMAP server.");
-
-  setupListeners();
-  startPooling();
-
-  if (!config.watchedFolders.length) {
-    console.warn("⚠️ No WATCHED_FOLDERS specified in environment variables.");
+  if (connection) {
+    await safeEndConnection(connection);
+    connection = null;
   }
 
-  for (const mailbox of config.watchedFolders) {
-    await checkMail(mailbox);
-  } 
+  const delay = Math.min(60000, 10000 * Math.pow(2, reconnectAttempts));
+  reconnectAttempts++;
+  console.log(`🔄 Connecting in ${delay / 1000}s...`);
+  await new Promise(res => setTimeout(res, delay));
 
-  } catch (error) {
-    console.error("❌ IMAP connection failed:", error.message);
-    retryConnect();
+  try {
+    connection = await safeConnect();
+    reconnectAttempts = 0;
+    console.log("✅ Connected to IMAP");
+    setupListeners();
+    startPooling();
+    reconnecting = false;
+  } catch (err) {
+    console.error("❌ Failed to connect:", err.message);
+    reconnecting = false;
+    connectImap(); // retry again
   }
 }
 
@@ -127,8 +132,6 @@ function startPooling() {
 }
 
 async function checkMail(mailbox = "INBOX") {
-  if (!connection) return;
-
   if (mailboxLocks.has(mailbox)) {
     console.log(`⏭️ ${mailbox} check skipped (already running)`);
     return;
@@ -207,19 +210,24 @@ async function checkMail(mailbox = "INBOX") {
   }
 }
 
+async function retryConnect() {
+  if (reconnecting) return; // prevent multiple reconnects
+  reconnecting = true;
 
-function retryConnect() {
+  if (poolingInterval) clearInterval(poolingInterval);
+  if (idleTimer) clearTimeout(idleTimer);
 
-  console.log("🔄 Retrying IMAP connection...");
+  if (connection) await safeEndConnection(connection);
+  connection = null;
 
-  try {
-    if (poolingInterval) clearInterval(poolingInterval);
-    if (connection) connection.end();
-  } catch {}
+  const delay = Math.min(60000, 10000 * Math.pow(2, reconnectAttempts));
+  reconnectAttempts++;
+  console.log(`🔄 Retrying IMAP connection in ${delay/1000}s...`);
 
-  setTimeout(() => {
-    connectImap();
-  }, 10000); // Retry after 10 seconds
+  setTimeout(async () => {
+    reconnecting = false;
+    await connectImap();
+  }, delay);
 }
 
 discord.once("clientReady", () => {
@@ -256,4 +264,19 @@ async function processDiscordQueue() {
   }
 
   isSendingDiscord = false;
+}
+
+async function safeConnect(timeout = 15000) {
+  return Promise.race([
+    imaps.connect({ imap: config.imap }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("IMAP connect timeout")), timeout))
+  ]);
+}
+
+async function safeEndConnection(conn, timeout = 5000) {
+  if (!conn) return;
+  return Promise.race([
+    new Promise(res => conn.end(() => res())),
+    new Promise(res => setTimeout(res, timeout))
+  ]);
 }
