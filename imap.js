@@ -5,6 +5,7 @@ const discord = require("./discord");
 const { getMailPreview } = require("./funcitons/getMailPreview");
 const { getRecipient } = require("./funcitons/getRecipient");
 const { hasProcessed, markAsProcessed } = require("./uidDatabase");
+const logger = require("./winston/winstonSetup");
 
 const config = {
   imap: {
@@ -62,18 +63,18 @@ async function connectImap() {
 
   const delay = Math.min(60000, 10000 * Math.pow(2, reconnectAttempts));
   reconnectAttempts++;
-  console.log(`🔄 Connecting in ${delay / 1000}s...`);
+  logger.info(`🔄 Connecting in ${delay / 1000}s...`);
   await new Promise(res => setTimeout(res, delay));
 
   try {
     connection = await safeConnect();
     reconnectAttempts = 0;
-    console.log("✅ Connected to IMAP");
+    logger.info("✅ Connected to IMAP");
     setupListeners();
     startPooling();
     reconnecting = false;
   } catch (err) {
-    console.error("❌ Failed to connect:", err.message);
+    logger.error("❌ Failed to connect:", err.message);
     reconnecting = false;
     connectImap(); // retry again
   }
@@ -82,7 +83,7 @@ async function connectImap() {
 function setupListeners() {
   connection.on("mail", async () => {
     if (isPooling) {
-      console.log("⏭️ IDLE ignored (polling active)");
+      logger.info("⏭️ IDLE ignored (polling active)");
       return;
     }
 
@@ -99,24 +100,24 @@ function setupListeners() {
   });
 
   connection.on("error", (err) => {
-    console.error("❌ IMAP error:", err.message);
+    logger.error("❌ IMAP error:", err.message);
     retryConnect();
   });
 }
 
 function startPooling() {
-  console.log("⏱️ Starting IMAP pooling fallback...");
+  logger.info("⏱️ Starting IMAP pooling fallback...");
 
   poolingInterval = setInterval(async () => {
-    console.log("🔄 IMAP Pooling Fallback Triggered: checking connection...");
+    logger.info("🔄 IMAP Pooling Fallback Triggered: checking connection...");
 
-    console.log(
+    logger.info(
     "🕒 Poll tick",
     new Date().toISOString()
     );
 
     if (isPooling){ 
-      console.log("⏭️ Poll skipped (already running)");
+      logger.info("⏭️ Poll skipped (already running)");
       return;
     }
     isPooling = true;
@@ -133,7 +134,7 @@ function startPooling() {
 
 async function checkMail(mailbox = "INBOX") {
   if (mailboxLocks.has(mailbox)) {
-    console.log(`⏭️ ${mailbox} check skipped (already running)`);
+    logger.info(`⏭️ ${mailbox} check skipped (already running)`);
     return;
   }
 
@@ -174,12 +175,12 @@ async function checkMail(mailbox = "INBOX") {
         recipients.some(r => config.ignoredEmails.includes(r));
 
       if (isIgnored) {
-        console.log(`⏭️ Ignored mail | from: ${sender} | to: ${recipients.join(", ")}`);
+        logger.info(`⏭️ Ignored mail | from: ${sender} | to: ${recipients.join(", ")}`);
         markAsProcessed(mailbox, uid);
         continue; 
       }
 
-      console.log(`📧 [${mailbox}] ${mail.subject}`);
+      logger.info(`📧 [${mailbox}] ${mail.subject}`);
 
       const channel = await discord.channels
         .fetch(config.discord.channelId)
@@ -204,7 +205,7 @@ async function checkMail(mailbox = "INBOX") {
     }
 
   } catch (err) {
-    console.error(`❌ Error checking ${mailbox}:`, err.message);
+    logger.error(`❌ Error checking ${mailbox}:`, err.message);
   } finally {
     mailboxLocks.delete(mailbox);
   }
@@ -222,7 +223,7 @@ async function retryConnect() {
 
   const delay = Math.min(60000, 10000 * Math.pow(2, reconnectAttempts));
   reconnectAttempts++;
-  console.log(`🔄 Retrying IMAP connection in ${delay/1000}s...`);
+  logger.info(`🔄 Retrying IMAP connection in ${delay/1000}s...`);
 
   setTimeout(async () => {
     reconnecting = false;
@@ -231,7 +232,7 @@ async function retryConnect() {
 }
 
 discord.once("clientReady", () => {
-  console.log("🤖 Discord bot ready");
+  logger.info("🤖 Discord bot ready");
   connectImap();
 });
 
@@ -252,9 +253,9 @@ async function processDiscordQueue() {
     for (const { channel, payload } of batch) {
       try {
         await channel.send(payload);
-        console.log("✅ Discord message sent");
+        logger.info("✅ Discord message sent");
       } catch (error) {
-        console.error("❌ Error sending Discord message:", error.message);
+        logger.error("❌ Error sending Discord message:", error.message);
       }
     }
 
@@ -280,3 +281,11 @@ async function safeEndConnection(conn, timeout = 5000) {
     new Promise(res => setTimeout(res, timeout))
   ]);
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught Exception:', err);
+});
