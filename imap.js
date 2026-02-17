@@ -67,12 +67,15 @@ async function connectImap() {
   await new Promise(res => setTimeout(res, delay));
 
   try {
-    connection = await safeConnect();
-    reconnectAttempts = 0;
-    logger.info("✅ Connected to IMAP");
-    setupListeners();
-    startPooling();
-    reconnecting = false;
+  connection = await safeConnect();
+  reconnectAttempts = 0;
+  logger.info("✅ Connected to IMAP");
+
+  isPooling = false;
+  mailboxLocks.clear();           // na wszelki wypadek czyścimy wszystkie locki
+  setupListeners();
+  startPooling();
+  reconnecting = false;
   } catch (err) {
     logger.error("❌ Failed to connect:", err.message);
     reconnecting = false;
@@ -81,16 +84,12 @@ async function connectImap() {
 }
 
 function setupListeners() {
-  connection.on("mail", async () => {
-    if (isPooling) {
-      logger.info("⏭️ IDLE ignored (polling active)");
-      return;
-    }
-
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      checkMail("INBOX");
-    }, 500);
+  connection.on("mail", () => {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+      logger.info("🔄 IDLE triggered full check");
+      config.watchedFolders.forEach(mb => checkMail(mb).catch(e => logger.error(e)));
+    }, 2000);
   });
 
   connection.on("close", () => {
@@ -109,41 +108,42 @@ function startPooling() {
   logger.info("⏱️ Starting IMAP pooling fallback...");
 
   poolingInterval = setInterval(async () => {
-    logger.info("🔄 IMAP Pooling Fallback Triggered: checking connection...");
-
-    logger.info(
-    "🕒 Poll tick",
-    new Date().toISOString()
-    );
-
-    if (isPooling){ 
-      logger.info("⏭️ Poll skipped (already running)");
-      return;
-    }
-    isPooling = true;
-
-    try {
-      for (const mailbox of config.watchedFolders) {
-        await checkMail(mailbox);
-      }
-    } finally {
-      isPooling = false;
-    }
-  }, config.polling.intervalMs || 300000); // Default to 5 minutes
-}
-
-async function checkMail(mailbox = "INBOX") {
-  if (mailboxLocks.has(mailbox)) {
-    logger.info(`⏭️ ${mailbox} check skipped (already running)`);
+  if (isPooling) {
+    logger.warn(`Polling tick SKIPPED – isPooling still true!`);
     return;
   }
 
-  mailboxLocks.add(mailbox);
+  isPooling = true;
+  logger.info(`Polling tick START – ${new Date().toISOString()}`);
 
   try {
-    if (!connection.box || connection.box.name !== mailbox) {
-      await connection.openBox(mailbox, false);
+    for (const mailbox of config.watchedFolders) {
+      await checkMail(mailbox);
     }
+  } catch (err) {
+      logger.error("Unexpected error in polling loop", err);
+    } finally {
+      isPooling = false;
+      logger.info("Polling tick FINISHED");
+    }
+  }, config.polling.intervalMs); // Default to 5 minutes
+}
+
+async function checkMail(mailbox = "INBOX", timeoutMs = 45000) {
+  if (mailboxLocks.has(mailbox)) return;
+
+  mailboxLocks.add(mailbox);
+
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`checkMail timeout ${mailbox}`)), timeoutMs)
+  );
+
+  try {
+    await Promise.race([
+      (async () => {
+        if (!connection.box || connection.box.name !== mailbox) {
+          await connection.openBox(mailbox, false);
+        }
 
     const results = await connection.search(
       ["UNSEEN"],
@@ -158,7 +158,6 @@ async function checkMail(mailbox = "INBOX") {
       const uid = res.attributes.uid;
 
       if (hasProcessed(mailbox, uid)) continue;
-      markAsProcessed(mailbox, uid); 
 
       const raw = res.parts[0].body;
       const mail = await simpleParser(raw);
@@ -202,10 +201,14 @@ async function checkMail(mailbox = "INBOX") {
           timestamp: mail.date
         }]
       });
+      markAsProcessed(mailbox, uid);
     }
-
+    })(),
+      timeoutPromise
+    ]);
   } catch (err) {
-    logger.error(`❌ Error checking ${mailbox}:`, err.message);
+    logger.error(`checkMail ${mailbox} failed or timeout: ${err.message}`);
+    // Można tu spróbować connection.end() lub reconnect
   } finally {
     mailboxLocks.delete(mailbox);
   }
