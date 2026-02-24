@@ -8,7 +8,7 @@ const errorLog = path.join(logDir, "bot-error.log");
 
 // Create logger
 const logger = winston.createLogger({
-  level: "info",
+  level: "debug",
   format: winston.format.combine(
     winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
     winston.format.printf(({ timestamp, level, message }) => `${timestamp} [${level.toUpperCase()}] ${message}`)
