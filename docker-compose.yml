@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  discord-bot:
+    build: .
+    container_name: discord-imap-listener
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./uidDatabase:/app/uidDatabase
+    restart: unless-stopped
